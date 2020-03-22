@@ -1,448 +1,410 @@
 const raspi = require('raspi');
-const Serial = require('raspi-serial').Serial;
-const Result = require("async-result");
+const SerialPort = require('serialport');
 
-const FINGERPRINT_DEBUG = true;
+const FINGERPRINT_DEBUG = false;
 const FINGERPRINT_OK = 0x00;
-const FINGERPRINT_PACKETRECIEVEERR = 0x01;
+const FINGERPRINT_KO = -1;
 const FINGERPRINT_NOFINGER = 0x02;
-const FINGERPRINT_IMAGEFAIL = 0x03;
-const FINGERPRINT_IMAGEMESS = 0x06;
-const FINGERPRINT_FEATUREFAIL = 0x07;
-const FINGERPRINT_NOMATCH = 0x08;
-const FINGERPRINT_NOTFOUND = 0x09;
-const FINGERPRINT_ENROLLMISMATCH = 0x0a;
-const FINGERPRINT_BADLOCATION = 0x0b;
-const FINGERPRINT_DBRANGEFAIL = 0x0c;
-const FINGERPRINT_UPLOADFEATUREFAIL = 0x0d;
-const FINGERPRINT_PACKETRESPONSEFAIL = 0x0e;
-const FINGERPRINT_UPLOADFAIL = 0x0f;
-const FINGERPRINT_DELETEFAIL = 0x10;
-const FINGERPRINT_DBCLEARFAIL = 0x11;
-const FINGERPRINT_PASSFAIL = 0x13;
-const FINGERPRINT_INVALIDIMAGE = 0x15;
-const FINGERPRINT_FLASHERR = 0x18;
-const FINGERPRINT_INVALIDREG = 0x1a;
-const FINGERPRINT_ADDRCODE = 0x20;
-const FINGERPRINT_PASSVERIFY = 0x21;
 const FINGERPRINT_STARTCODE = 0xef01;
 const FINGERPRINT_COMMANDPACKET = 0x1;
-const FINGERPRINT_DATAPACKET = 0x2;
 const FINGERPRINT_ACKPACKET = 0x7;
-const FINGERPRINT_ENDDATAPACKET = 0x8;
 const FINGERPRINT_TIMEOUT = 0xff;
 const FINGERPRINT_BADPACKET = 0xfe;
 const FINGERPRINT_GETIMAGE = 0x01;
 const FINGERPRINT_IMAGE2TZ = 0x02;
 const FINGERPRINT_REGMODEL = 0x05;
 const FINGERPRINT_STORE = 0x06;
-const FINGERPRINT_LOAD = 0x07;
-const FINGERPRINT_UPLOAD = 0x08;
 const FINGERPRINT_DELETE = 0x0c;
 const FINGERPRINT_EMPTY = 0x0d;
 const FINGERPRINT_VERIFYPASSWORD = 0x13;
 const FINGERPRINT_HISPEEDSEARCH = 0x1b;
 const FINGERPRINT_TEMPLATECOUNT = 0x1d;
 
-class ZFM20 {
+class ZFM {
 
-
-    constructor(_portConfig) {
-        this.portConfig = _portConfig;
+    constructor(_port, _baudRate) {
+        this.serial = new SerialPort(_port, {
+            baudRate: _baudRate
+        });
         this.fingerID = 0xffff;
         this.confidence = 0xffff;
         this.templateCount = 0;
         this.thePassword = 0;
         this.theAddress = 0xffffffff;
-        this.onData = (data) => {
-            console.log("No handler for data");
-        };
+        this.parser = this.serial;
+        this.onData = (data) => { };
     }
 
-    get getSerial() {
-        return this.serial;
-    }
-    /**
-     * Permet de connecter le module de reconnaissance.
-     * Le port serie doit avoir ete configure avec le constructeur.
-     * A l'ouverture du port, le mot de passe est verifie.
-     * Si pas le probleme la communication est ouverte.
-     * Si le module est introuvable, le port est ferme.
-     * 
-     * Erreurs : 
-     * -- Module introuvable
-     * -- 
-     *
-     * @memberof ZFM20
-     */
-    connect() {
-        raspi.init(() => {
-            this.serial = new Serial(this.portConfig);
-            this.serial.open(() => {
-                this.verifyPassword()
-                    .error((err) => {
-                        if (err) {
-                            console.log(err);
-                        }
-                        console.log("Error connecting with module");
-                    })
-                    .fail((err) => {
-                        if (err) {
-                            console.log(err);
-                        }
-                        console.log("Module not found");
-                        this.serial.close((err) => {
-                            if (err) {
-                                console.log("Error while closing : ", err);
-                            } else {
-                                console.log("Port closed");
-                            }
-                        });
-                    })
-                    .ok(() => {
-                        console.log("Module ready");
-                        this.serial.on("data", (data) => {
-                            this.onData(data);
-                        });
+    async connect() {
+        return new Promise((resolve, reject) => {
+            try {
+                raspi.init(() => {
+                    this.parser.on("data", (data) => {
+                        this.onData(data);
                     });
-            });
+                    this.parser.on("open", () => {
+                        zfm.verifyPassword().then(
+                            ret => {
+                                if (ret) {
+                                    resolve();
+                                } else {
+                                    reject();
+                                }
+                            },
+                        );
+                    });
+                    this.parser.on("error", (err) => {
+                        if (err) {
+                            console.log(err.message)
+                            reject(err);
+                        }
+                    });
+                    this.serial.open((err) => {
+                        if (err) {
+                            console.log(err.message)
+                        }
+                    });
+                });
+            } catch (error) {
+                this.parser.close((err) => {
+                    if (err) {
+                        console.log("Error while closing : ", err);
+                    } else {
+                        console.log("Port closed");
+                    }
+                });
+                reject(error);
+            }
         });
     }
 
-    /**
-     * Permet de creer une empreinte et la sauvegarder.
-     * La fonction wait permet de gerer une sortie de dialogue (ie : LCD I2C).
-     * Par defaut on affiche juste un texte sur la console.
-     *
-     * @param {*} id
-     * @param {string} [wait=() => {
-     *         console.log("Waiting for finger");
-     *     }]
-     * @returns : un objet result
-     * @memberof ZFM20
-     */
-    enroll(id, wait = () => {
-        console.log("Waiting for finger");
-    }) {
-        var result = new Result();
-        var fp = this;
 
-        result.wait = (cb) => {
-            wait = cb;
-        };
-
-        var takeImage_1 = () => {
-            wait();
-            fp.getImage()
-                .fail(result.fail)
-                .ok((code) => {
-                    fp.evaluateCode(code, takeImage2tz_1, takeImage_1, result.fail);
-                });
-        };
-        var takeImage2tz_1 = () => {
-            wait();
-            fp.image2Tz(1)
-                .fail(result.fail)
-                .ok((code) => {
-                    fp.evaluateCode(code, takeImage_2, takeImage2tz_1, result.fail);
-                });
-        };
-        var takeImage_2 = () => {
-            wait();
-            fp.getImage()
-                .fail(result.fail)
-                .ok((code) => {
-                    fp.evaluateCode(code, takeImage2tz_2, takeImage_2, result.fail);
-                });
-        };
-        var takeImage2tz_2 = () => {
-            wait();
-            fp.image2Tz(2)
-                .fail(result.fail)
-                .ok((code) => {
-                    fp.evaluateCode(code, createModelImage, takeImage2tz_2, result.fail);
-                });
-        };
-        var createModelImage = () => {
-            fp.createModel()
-                .fail(result.fail)
-                .ok((code) => {
-                    fp.evaluateCode(code, storeModelImage, null, result.fail);
-                });
-        };
-        var storeModelImage = () => {
-            fp.storeModel(id)
-                .fail(result.fail)
-                .ok((code) => {
-                    fp.evaluateCode(
-                        code,
-                        () => {
-                            result.ok(id, "Fingerprint stored");
-                        },
-                        null,
-                        result.fail
-                    );
-                });
-        };
-        takeImage_1();
-        return result;
-    }
-    /**
-     * Permet de chercher une empreinte prealablement enregistree.
-     * 
-     *
-     * @param {string} [wait=() => {
-     *         console.log("Waiting for finger");
-     *     }]
-     * @returns : un objet result
-     * @memberof ZFM20
-     */
-    read(wait = () => {
-        console.log("Waiting for finger");
-    }) {
-        var result = new Result();
-        var fp = this;
-
-        result.wait = function (cb) {
-            wait = cb;
-        };
-
-        var takeImage_1 = () => {
-            wait();
-            fp.getImage()
-                .error(result.error)
-                .fail(result.fail)
-                .ok(function (code) {
-                    fp.evaluateCode(code, takeImage2tz_1, takeImage_1, result.fail);
-                });
-        };
-        var takeImage2tz_1 = () => {
-            wait();
-            fp.image2Tz(1)
-                .error(result.error)
-                .fail(result.fail)
-                .ok(function (code) {
-                    fp.evaluateCode(code, find, takeImage2tz_1, result.fail);
-                });
-        };
-        var find = () => {
-            fp.fingerFastSearch()
-                .fail(result.fail)
-                .error(result.error)
-                .ok(function (code) {
-                    fp.evaluateCode(
-                        code,
-                        () => {
-                            result.ok(fingerID, "fingerprint found");
-                        },
-                        null,
-                        result.fail
-                    );
-                });
-        };
-        takeImage_1();
-        return result;
-    }
-    /**
-     * Permet d'effacer une empreinte prealablement enregistree.
-     *
-     * @param {*} id
-     * @returns : un objet result
-     * @memberof ZFM20
-     */
-    delete(id) {
-        var result = new Result();
-        this.deleteModel(id)
-            .fail(result.fail)
-            .error(result.error)
-            .ok(function (code) {
-                this.evaluateCode(
-                    code,
-                    () => {
-                        result.ok(id, "Fingerprint ID " + id + " deleted.");
-                    },
-                    null,
-                    result.fail
-                );
-            });
-        return result;
-    }
-    /**
-     * Permet de charger une empreinte (TODO : a voir pas clair)
-     *
-     * @param {*} id
-     * @returns
-     * @memberof ZFM20
-     */
-    load(id) {
-        var result = new Result();
-        var fp = this;
-        fp.loadModel(id)
-            .error(result.error)
-            .fail(result.fail)
-            .ok((code) => {
-                fp.evaluateCode(code, getfp, null, result.fail);
-            });
-        var getfp = () => {
-            fp.getModel()
-                .error(result.error)
-                .fail(result.fail)
-                .ok((code, packet) => {
-                    fp.evaluateCode(
-                        code,
-                        () => {
-                            result.ok(packet, "Fingerprint loaded");
-                        },
-                        null,
-                        result.fail
-                    );
-                });
-        };
+    async verifyPassword() {
+        let result = false;
+        try {
+            let packet = [FINGERPRINT_VERIFYPASSWORD, this.thePassword >> 24, this.thePassword >> 16, this.thePassword >> 8, this.thePassword];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 7, packet);
+            let len = await this.getReply(packet, 500);
+            if ((len == 1) && (packet[0] == FINGERPRINT_ACKPACKET) && (packet[1] == FINGERPRINT_OK)) {
+                result = true;
+            }
+        } catch (err) {
+            this.decodeError(err);
+        }
         return result;
     }
 
-    getImage() {
-        var packet = [FINGERPRINT_GETIMAGE],
-            result = new Result();
-        this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 3, packet);
-        this.onReply(result, packet);
+    async getImage() {
+        try {
+            let result = FINGERPRINT_OK;
+            let packet = [FINGERPRINT_GETIMAGE];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 3, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async imaget2Tz(slot) {
+        try {
+            let result = FINGERPRINT_OK;
+            let packet = [FINGERPRINT_IMAGE2TZ, slot];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 4, packet);
+            let len = await this.getReply(packet, 1000);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async createModel() {
+        try {
+            let result = FINGERPRINT_OK;
+            let packet = [FINGERPRINT_REGMODEL];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 3, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async storeModel(id) {
+        try {
+            let result = FINGERPRINT_OK;
+            let packet = [FINGERPRINT_STORE, 0x01, id >> 8, id & 0xFF];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 6, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async deleteModel(id) {
+        try {
+            let result = FINGERPRINT_OK;
+            let packet = [FINGERPRINT_DELETE, id >> 8, id & 0xFF, 0x00, 0x01];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 7, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async emptyDatabase() {
+        try {
+            let result = FINGERPRINT_OK;
+            let packet = [FINGERPRINT_EMPTY];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 3, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async fingerFastSearch() {
+        try {
+            let result = FINGERPRINT_OK;
+            this.fingerID = 0xffff;
+            this.confidence = 0xffff;
+            let packet = [FINGERPRINT_HISPEEDSEARCH, 0x01, 0x00, 0x00, 0x00, 0xA3];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 8, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                this.fingerID = packet[2];
+                this.fingerID <<= 8;
+                this.fingerID |= packet[3];
+
+                this.confidence = packet[4];
+                this.confidence <<= 8;
+                this.confidence |= packet[5];
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async getTemplateCount() {
+        try {
+            let result = FINGERPRINT_OK;
+            this.templateCount = 0xFFFF;
+            let packet = [FINGERPRINT_TEMPLATECOUNT];
+            this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 3, packet);
+            let len = await this.getReply(packet);
+            if ((len != 1) && (packet[0] != FINGERPRINT_ACKPACKET)) {
+                result = FINGERPRINT_KO;
+            } else {
+                this.templateCount = packet[2];
+                this.templateCount <<= 8;
+                this.templateCount |= packet[3];
+                result = packet[1];
+            }
+            return result;
+        } catch (err) {
+            this.decodeError(err);
+        }
+    }
+
+    async getFingerprintIDez(onSuccessCb) {
+        let code = await this.getImage();
+        if (code == FINGERPRINT_OK) {
+            code = await this.imaget2Tz(1);
+            if (code == FINGERPRINT_OK) {
+                code = await this.fingerFastSearch();
+                if (code == FINGERPRINT_OK) {
+                    onSuccessCb && onSuccessCb(this.fingerID, this.confidence);
+                }
+            }
+        }
+        return code;
+    }
+
+    async waitForRegisteredFingerPrint(onSuccessCb) {
+        let code = await this.getFingerprintIDez(onSuccessCb);
+        while (code != FINGERPRINT_OK) {
+            this.decodeError(code);
+            code = await this.getFingerprintIDez(onSuccessCb);
+        }
+    }
+
+    async continuousFingerScan(onSuccessCb) {
+        while (1) {
+            await this.waitForRegisteredFingerPrint(onSuccessCb);
+        }
+    }
+
+    async getFingerprintEnroll(id, waitMsgCb, removeFingerMsgCb, sameFingerMsgCb, onStoreOk, errorMsgCb) {
+        waitMsgCb && waitMsgCb();
+        let code = await this.getImage();
+        while (code != FINGERPRINT_OK) {
+            code = await this.getImage();
+            switch (code) {
+                case FINGERPRINT_OK:
+                case FINGERPRINT_NOFINGER:
+                    break;
+                default:
+                    this.decodeError(code, errorMsgCb);
+                    break;
+            }
+        }
+
+        code = await this.imaget2Tz(1);
+        switch (code) {
+            case FINGERPRINT_OK:
+                break;
+            default:
+                this.decodeError(code, errorMsgCb);
+                break;
+        }
+
+        removeFingerMsgCb && removeFingerMsgCb();
+        code = await this.getImage();
+        while (code != FINGERPRINT_NOFINGER) {
+            code = await this.getImage();
+        }
+
+        sameFingerMsgCb && sameFingerMsgCb();
+        code = -1;
+        while (code != FINGERPRINT_OK) {
+            code = await this.getImage();
+            switch (code) {
+                case FINGERPRINT_OK:
+                case FINGERPRINT_NOFINGER:
+                    break;
+                default:
+                    this.decodeError(code, errorMsgCb);
+                    break;
+            }
+        }
+
+        code = await this.imaget2Tz(2);
+        switch (code) {
+            case FINGERPRINT_OK:
+                break;
+            default:
+                this.decodeError(code, errorMsgCb);
+                break;
+        }
+
+        code = await this.createModel();
+        switch (code) {
+            case FINGERPRINT_OK:
+                break;
+            default:
+                this.decodeError(code, errorMsgCb);
+                break;
+        }
+
+        code = await this.storeModel(id);
+        switch (code) {
+            case FINGERPRINT_OK:
+                fingerOkMsgCb && fingerOkMsgCb();
+                onStoreOk && onStoreOk();
+                break;
+            default:
+                this.decodeError(code, errorMsgCb);
+                break;
+        }
+    }
+
+    async continuousEnroll(id, waitMsgCb,removeFingerMsgCb, sameFingerMsgCb, onStoreOk, errorMsgCb) {
+        while (true) {
+            await this.getFingerprintEnroll(id, waitMsgCb,removeFingerMsgCb, sameFingerMsgCb, onStoreOk, errorMsgCb);
+            await this.timeout(3000);
+            id++;
+        }
+    }
+
+    checkReply(reply, packet) {
+        let result = FINGERPRINT_BADPACKET;
+        this.debug("\nReply: ", reply);
+        if (
+            reply[0] !== FINGERPRINT_STARTCODE >> 8 &&
+            reply[1] !== (FINGERPRINT_STARTCODE & 0xff)
+        ) {
+            result = FINGERPRINT_BADPACKET;
+        } else {
+            var len = reply[7],
+                end = reply.length - 2,
+                packettype = reply[6];
+            len <<= 8;
+            len |= reply[8];
+            len -= 2;
+
+            packet[0] = packettype;
+            for (var i = 0; i < end; i++) {
+                packet[1 + i] = reply[9 + i];
+            }
+
+            result = len;
+        }
         return result;
     }
 
-    image2Tz(slot) {
-        var packet = [FINGERPRINT_IMAGE2TZ, slot],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    createModel() {
-        var packet = [FINGERPRINT_REGMODEL],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    storeModel(id) {
-        var packet = [FINGERPRINT_STORE, 0x01, id >> 8, id & 0xff],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    loadModel(id) {
-        var packet = [FINGERPRINT_LOAD, 0x01, id >> 8, id & 0xff],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    getModel() {
-        var packet = [FINGERPRINT_UPLOAD, 0x01],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    deleteModel(id) {
-        var packet = [FINGERPRINT_DELETE, id >> 8, id & 0xff, 0x00, 0x01],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    emptyDatabase() {
-        var packet = [FINGERPRINT_EMPTY],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet);
-        return result;
-    }
-
-    fingerFastSearch() {
-        this.fingerID = 0xffff;
-        this.confidence = 0xffff;
-        // high speed search of slot #1 starting at page 0x0000 and page #0x00A3
-        var packet = [FINGERPRINT_HISPEEDSEARCH, 0x01, 0x00, 0x00, 0x00, 0xa3],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet, () => {
-            this.fingerID = packet[2];
-            this.fingerID <<= 8;
-            this.fingerID |= packet[3];
-            this.confidence = packet[4];
-            this.confidence <<= 8;
-            this.confidence |= packet[5];
+    getReply(packet, timeout) {
+        return new Promise((resolve, reject) => {
+            timeout = timeout || 500;
+            let result = 0;
+            let reply = Buffer.from([]);
+            this.onData = (data) => {
+                this.debug("Receiving part of buffer: ", data);
+                reply = Buffer.concat([reply, data]);
+            };
+            setTimeout(() => {
+                if (reply.length == 0) {
+                    reject(FINGERPRINT_TIMEOUT);
+                } else {
+                    result = this.checkReply(reply, packet);
+                    this.onData = () => { };
+                    if (result == FINGERPRINT_BADPACKET) {
+                        reject(FINGERPRINT_BADPACKET);
+                    } else {
+                        resolve(result);
+                    }
+                }
+            }, timeout);
         });
-        return result;
     }
 
-    getTemplateCount() {
-        this.templateCount = 0xffff;
-        var packet = [FINGERPRINT_TEMPLATECOUNT],
-            result = new Result();
-        this.writePacket(
-            this.theAddress,
-            FINGERPRINT_COMMANDPACKET,
-            packet.length + 2,
-            packet
-        );
-        this.onReply(result, packet, () => {
-            this.templateCount = packet[2];
-            this.templateCount <<= 8;
-            this.templateCount |= packet[3];
-        });
-        return result;
-    }
-
-
-    writePacket(addr, packettype, len, packet, callback) {
+    writePacket(addr, packetType, len, packet) {
         var buffer = [];
 
         buffer.push(FINGERPRINT_STARTCODE >> 8);
@@ -451,11 +413,11 @@ class ZFM20 {
         buffer.push(addr >> 16);
         buffer.push(addr >> 8);
         buffer.push(addr);
-        buffer.push(packettype);
+        buffer.push(packetType);
         buffer.push(len >> 8);
         buffer.push(len);
 
-        var sum = (len >> 8) + (len & 0xff) + packettype;
+        var sum = (len >> 8) + (len & 0xff) + packetType;
         for (var i = 0; i < len - 2; i++) {
             buffer.push(packet[i]);
             sum += packet[i];
@@ -464,107 +426,57 @@ class ZFM20 {
         buffer.push(sum >> 8);
         buffer.push(sum);
         buffer = Buffer.from(buffer);
-        if (FINGERPRINT_DEBUG) {
-            console.log("\nSending: ", buffer);
-        }
-        this.serial.write(buffer, callback);
+        this.debug("\nSending: ", buffer);
+        this.serial.write(buffer);
     }
 
-    getReply(reply, packet) {
-        FINGERPRINT_DEBUG && console.log("\nReply: ", reply);
-        if (
-            reply[0] !== FINGERPRINT_STARTCODE >> 8 &&
-            reply[1] !== (FINGERPRINT_STARTCODE & 0xff)
-        )
-            return FINGERPRINT_BADPACKET;
-        var len = reply[7],
-            end = reply.length - 2,
-            packettype = reply[6];
-        len <<= 8;
-        len |= reply[8];
-        len -= 2;
-
-        packet[0] = packettype;
-        for (var i = 0; i < end; i++) {
-            packet[1 + i] = reply[9 + i];
-        }
-
-        return len;
+    timeout(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    onReply(result, packet, onok, timeout) {
-        var reply = Buffer.from([]);
-        timeout = timeout || 500;
-        setTimeout(function () {
-            if (reply.length == 0) {
-                return result.fail(
-                    "Timeout receiving packet " + timeout + " ms"
-                );
-            }
-            var len = this.getReply(reply, packet);
-            if (len != 1 && packet[0] != FINGERPRINT_ACKPACKET) {
-                return result.fail(-1);
-            }
-            onok && onok();
-            return result.ok(packet[1], packet);
-        }, timeout);
-
-        this.onData = (rbuffer) => {
-            if (FINGERPRINT_DEBUG) {
-                console.log("Receiving part of buffer: ", rbuffer);
-            }
-            reply = Buffer.concat([reply, rbuffer]);
-        };
-    }
-
-    verifyPassword() {
-        var packet = [
-            FINGERPRINT_VERIFYPASSWORD,
-            this.thePassword >> 24,
-            this.thePassword >> 16,
-            this.thePassword >> 8,
-            this.thePassword
-        ],
-            result = new Result();
-        this.writePacket(this.theAddress, FINGERPRINT_COMMANDPACKET, 7, packet);
-        this.onReply(result, packet);
-        return result;
-    }
-
-    evaluateCode(code, onok, repeat, onfail) {
+    decodeError(code, errorMsgCb) {
+        let result;
         switch (code) {
-            case FINGERPRINT_OK:
-                onok();
-                break;
-            case FINGERPRINT_PACKETRECIEVEERR:
-                onfail && onfail(code, "Communication error");
-                break;
-            case FINGERPRINT_NOFINGER:
-                repeat && repeat();
-                break;
-            case FINGERPRINT_IMAGEFAIL:
-                onfail && onfail(code, "Imaging error");
-                break;
-            case FINGERPRINT_FEATUREFAIL:
-                onfail && onfail(code, "Feature fail");
-                break;
-            case FINGERPRINT_INVALIDIMAGE:
-                onfail && onfail(code, "Invalid image");
-                break;
-            case FINGERPRINT_BADLOCATION:
-                onfail && onfail(code, "Could not delete in that location");
-                break;
-            case FINGERPRINT_FLASHERR:
-                onfail && onfail(code, "Error writing to flash");
-                break;
-            case FINGERPRINT_NOTFOUND:
-                onfail && onfail(code, "Not found");
-                break;
-            default:
-                onfail && onfail(code, "Unknown error");
-                break;
+            case 0x00: result = "Command execution complete"; break;
+            case 0x01: result = "Error when receiving data package"; break;
+            case 0x02: result = "No finger on the sensor"; break;
+            case 0x03: result = "Fail to enroll the finger"; break;
+            case 0x06: result = "Fail to generate character file due to the over-disorderly fingerprint image"; break;
+            case 0x07: result = "Fail to generate character file due to lackness of character point or over-smallness of fingerprint image"; break;
+            case 0x08: result = "Finger doesn't match"; break;
+            case 0x09: result = "Fail to find the matching finger"; break;
+            case 0x0A: result = "Fail to combine the character files"; break;
+            case 0x0B: result = "Addressing PageID is beyond the finger library"; break;
+            case 0x0C: result = "Error when reading template from library or the template is invalid"; break;
+            case 0x0D: result = "Error when uploading template"; break;
+            case 0x0E: result = "Module cant receive the following data packages."; break;
+            case 0x0F: result = "Error when uploading image"; break;
+            case 0x10: result = "Fail to delete the template"; break;
+            case 0x11: result = "Fail to clear finger library"; break;
+            case 0x15: result = "Fail to generate the image for the lackness of valid primary image"; break;
+            case 0x18: result = "Error when writing flash"; break;
+            case 0x19: result = "No definition error"; break;
+            case 0x1A: result = "Invalid register number"; break;
+            case 0x1B: result = "Incorrect configuration of register"; break;
+            case 0x1C: result = "Wrong notepad page number"; break;
+            case 0x1D: result = "fail to operate the communication port"; break;
+            case 0xFF: result = "Response timeout"; break;
+            default: result = "Unknow error"; break;
+        }
+        if (errorMsgCb) {
+            errorMsgCb(result);
+        } else {
+            this.debug(result);
+        }
+    }
+
+    debug(msg, code) {
+        if (FINGERPRINT_DEBUG) {
+            if (code) {
+                console.log(msg, code);
+            } else {
+                console.log(msg);
+            }
         }
     }
 }
-
-exports.ZFM20 = ZFM20;
